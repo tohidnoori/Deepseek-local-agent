@@ -6,3 +6,9 @@ venv/
 .mypy_cache/
 .deepseek_agent_backups/
 sessions.json
+
+# Local diffs — do not commit
+all_changes.txt
+changes.txt
+agent/all_changes.txt
+agent/changes.txt
