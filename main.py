@@ -380,6 +380,10 @@ class MainWindow(QMainWindow):
         self.connect_btn = QPushButton("Connect browser")
         self.connect_btn.clicked.connect(self.connect_browser)
         top.addWidget(self.connect_btn)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setToolTip("Reconnect if the browser gets a socket error or locks up")
+        self.refresh_btn.clicked.connect(self.refresh_browser)
+        top.addWidget(self.refresh_btn)
         self.signed_btn = QPushButton("I've signed in")
         self.signed_btn.setEnabled(False)
         self.signed_btn.clicked.connect(self.finish_login)
@@ -773,6 +777,24 @@ class MainWindow(QMainWindow):
         self._ensure_controller()
         self.refresh_deepseek_chats()
         QMessageBox.information(self, "Connected", "Browser session ready.")
+
+    def refresh_browser(self):
+        """Reconnect to Chrome if the browser hit a socket error or locked up."""
+        if not self.browser.ready:
+            QMessageBox.information(self, "Refresh", "Browser is not connected yet. Click 'Connect browser' first.")
+            return
+        try:
+            self.status.setText("Refreshing browser...")
+            ok = self.browser.refresh(navigate=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Browser error", str(e))
+            self.status.setText("Browser not connected")
+            return
+        if ok:
+            self.status.setText("Browser ready (refreshed)")
+        else:
+            self.status.setText("Refresh failed — try Connect again")
+            QMessageBox.warning(self, "Refresh", "Could not refresh the browser. Try 'Connect browser' again.")
 
     def _ensure_controller(self):
         if not (self.browser.ready and self.project_root): return

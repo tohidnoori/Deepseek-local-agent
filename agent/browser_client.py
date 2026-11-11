@@ -131,6 +131,11 @@ class DeepSeekBrowser:
         self._recent_prompts: list[float] = []
         self._prompts_since_break = 0
 
+        # --- refresh / reconnect (socket errors, locked UI) ---
+        self.auto_refresh: bool = True
+        self.max_refresh_attempts: int = 2
+        self.refresh_wait_s: float = 2.5
+
         self.playwright = None
         self.browser = None
         self.context = None
@@ -233,6 +238,62 @@ class DeepSeekBrowser:
         self.browser = None
         self.context = None
         self.page = None
+
+    # ----------------------------------------------------------- refresh
+    @staticmethod
+    def _is_socket_error(exc: Exception) -> bool:
+        """True for socket/dead-page/connection-reset style failures."""
+        name = type(exc).__name__.lower()
+        text = str(exc).lower()
+        needles = (
+            "target closed", "target page", "browser has been closed",
+            "connection closed", "connection reset", "connection aborted",
+            "socket", "disconnected", "websocket", "broken pipe",
+            "page crashed", "session closed", "protocol error",
+            "cannot find context", "execution context was destroyed",
+        )
+        return any(n in text for n in needles) or any(
+            k in name for k in ("targetclosed", "connection", "websocket", "timeout")
+        )
+
+    def _page_alive(self) -> bool:
+        try:
+            return bool(self.page) and not self.page.is_closed()
+        except Exception:
+            return False
+
+    def refresh(self, navigate: bool = False) -> bool:
+        """Detach from Playwright and re-attach to Chrome. Returns True on success.
+
+        Also used to recover from 'locked' UIs by optionally reloading the page.
+        """
+        log.info("refresh: detaching and re-attaching to Chrome")
+        try:
+            self.close()
+        except Exception:
+            pass
+        try:
+            self.attach()
+        except Exception as e:
+            log.info("refresh: re-attach failed: %s", e)
+            return False
+        if navigate:
+            try:
+                if not self._page_alive():
+                    self.page = self.context.new_page()
+                self.page.goto(DEEPSEEK_URL, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(1.0)
+                self.set_deepthink(self._deepthink_on)
+            except Exception as e:
+                log.info("refresh: navigation failed: %s", e)
+                return False
+        return self._page_alive()
+
+    def _refresh_and_wait(self, navigate: bool) -> bool:
+        ok = self.refresh(navigate=navigate)
+        if ok and self.refresh_wait_s > 0:
+            self._human_pause(self.refresh_wait_s, self.refresh_wait_s + 1.0)
+        return ok
 
     # ----------------------------------------------------------- helpers
     def _first_visible(self, selectors: list[str], allow_disabled: bool = False):
@@ -593,6 +654,37 @@ class DeepSeekBrowser:
     # ----------------------------------------------------------- send
     def send_and_wait(self, prompt: str, timeout: int = BROWSER_TIMEOUT,
                       attachments: list[str] | None = None) -> str:
+        """Send a prompt, auto-recovering from socket errors / locked UI.
+
+        On a socket/dead-page/connection failure (or a stuck 'streaming' UI),
+        it refreshes the Playwright connection (and reloads the page when
+        needed) then retries, up to ``max_refresh_attempts`` times.
+        """
+        attempts = self.max_refresh_attempts if self.auto_refresh else 0
+        last_err: Exception | None = None
+        for attempt in range(attempts + 1):
+            if not self._page_alive():
+                if not self._refresh_and_wait(navigate=False):
+                    last_err = BrowserError("Not attached to a page and refresh failed.")
+                    continue
+            try:
+                return self._send_once(prompt, timeout=timeout, attachments=attachments)
+            except Exception as e:
+                last_err = e
+                if attempt >= attempts or not self._is_socket_error(e):
+                    raise
+                # Locked/stuck UI: first try a light re-attach, then a reload.
+                navigate = attempt > 0 or not self._page_alive()
+                log.info("send failed (%s); refreshing (navigate=%s, attempt %d/%d)",
+                         e, navigate, attempt + 1, attempts)
+                if not self._refresh_and_wait(navigate=navigate):
+                    log.info("refresh failed; will retry anyway")
+        if last_err:
+            raise BrowserError(f"Send failed after refresh attempts: {last_err}")
+        raise BrowserError("Send failed: unknown error")
+
+    def _send_once(self, prompt: str, timeout: int = BROWSER_TIMEOUT,
+                   attachments: list[str] | None = None) -> str:
         if not self.page:
             raise BrowserError("Not attached to a page.")
 
@@ -660,4 +752,6 @@ class DeepSeekBrowser:
                     log.info("reply received len=%d", len(current))
                     return current
 
-        raise BrowserError(f"Timed out after {timeout}s waiting for a DeepSeek reply.")
+        raise BrowserError(
+            f"Reply timeout: no stable reply after {timeout}s (possible locked UI)."
+        )

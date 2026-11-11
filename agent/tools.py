@@ -12,6 +12,7 @@ from typing import Any
 from .config import (
     AgentConfig,
     MAX_FILE_BYTES,
+    MAX_INLINE_READ_BYTES,
     MAX_LIST_RESULTS,
     MAX_SEARCH_FILE_BYTES,
     MAX_SEARCH_HITS,
@@ -52,6 +53,9 @@ class ProjectTools:
         self.config = config or AgentConfig()
         self.backup_dir = self.root / ".deepseek_agent_backups"
         self.ignored = set(self.config.ignored_dirs)
+        # Absolute paths of large files that read_file could not inline; the
+        # controller attaches these as uploads on the next browser request.
+        self.pending_attachments: list[str] = []
 
     # ------------------------------------------------------------------ paths
     def _path(self, relative: str | Path) -> Path:
@@ -127,6 +131,17 @@ class ProjectTools:
         size = p.stat().st_size
         if size > MAX_FILE_BYTES:
             raise ToolError(f"File too large ({size} bytes > {MAX_FILE_BYTES}).")
+        # Large files: attach as an upload instead of pasting the whole body
+        # into the prompt. Full reads only; explicit line ranges still inline.
+        if start <= 1 and end is None and size > MAX_INLINE_READ_BYTES:
+            abs_path = str(p)
+            if abs_path not in self.pending_attachments:
+                self.pending_attachments.append(abs_path)
+            return (
+                f"# {self.rel(p)} is large ({size} bytes > {MAX_INLINE_READ_BYTES}); "
+                "attaching it as a file upload instead of inlining. "
+                "Use a start/end line range to read a specific slice inline."
+            )
         text = p.read_text(encoding="utf-8", errors="replace")
         if start <= 1 and end is None:
             return text

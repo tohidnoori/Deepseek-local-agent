@@ -19,6 +19,8 @@ SENSITIVE_NAME_PARTS = frozenset({
 })
 
 MAX_FILE_BYTES = 1_000_000
+# Files larger than this are attached as uploads instead of pasted into the prompt.
+MAX_INLINE_READ_BYTES = 40_000
 MAX_SEARCH_FILE_BYTES = 500_000
 MAX_LIST_RESULTS = 400
 MAX_SEARCH_HITS = 200

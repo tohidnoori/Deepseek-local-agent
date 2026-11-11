@@ -10,7 +10,7 @@ from .config import AgentConfig
 from .errors import AgentError, ToolDenied, ToolError
 from .git_tools import AGENT_TOOLS as GIT_AGENT_TOOLS, GitTools
 from .logging_setup import get_logger
-from .prompts import continuation_prompt, system_prompt
+from .prompts import MAX_FILES_PER_REQUEST, continuation_prompt, system_prompt
 from .registry import ToolRegistry
 from .shell_tools import ShellTools
 from .tools import ProjectTools
@@ -256,6 +256,26 @@ class AgentController:
                 i += 1
 
     @staticmethod
+    def _limit_file_reads(calls: list[ToolCall], max_files: int = MAX_FILES_PER_REQUEST) -> list[ToolCall]:
+        """Drop read_file calls beyond `max_files` per request and drop duplicate paths."""
+        if max_files <= 0:
+            return calls
+        out: list[ToolCall] = []
+        seen_paths: set[str] = set()
+        reads = 0
+        for c in calls:
+            if c.name == "read_file":
+                path = str(c.arguments.get("path", "")).strip().replace("\\", "/")
+                if reads >= max_files or (path and path in seen_paths):
+                    log.info("dropping extra read_file (%s); limit=%d", path, max_files)
+                    continue
+                reads += 1
+                if path:
+                    seen_paths.add(path)
+            out.append(c)
+        return out
+
+    @staticmethod
     def _normalize_calls(parsed: dict[str, Any]) -> list[ToolCall]:
         calls: list[ToolCall] = []
         for raw in parsed.get("tool_calls", []):
@@ -361,7 +381,14 @@ class AgentController:
             if attachments:
                 note = f" with {len(attachments)} attachment(s)"
             emit(f"▶ Round {round_no}/{self.config.max_rounds} — sending prompt ({len(transcript)} chars, {format_mode}){note}…")
-            round_attachments = attachments if round_no == 1 else None
+            pending = list(getattr(self.tools, "pending_attachments", []) or [])
+            if pending:
+                self.tools.pending_attachments = []
+            round_attachments = (attachments if round_no == 1 else None) or None
+            if pending:
+                merged = list(dict.fromkeys((round_attachments or []) + pending))
+                round_attachments = merged[: MAX_FILES_PER_REQUEST]
+                emit(f"📎 Attaching {len(round_attachments)} large file(s) as uploads.")
             last_response = self.browser.send_and_wait(transcript, attachments=round_attachments)
             emit(f"◀ Reply received ({len(last_response)} chars). Parsing…")
 
@@ -375,7 +402,7 @@ class AgentController:
                 emit("✔ No tool calls — treating reply as final summary.")
                 return last_response.strip()
 
-            calls = self._normalize_calls(parsed)[: self.config.max_tool_calls_per_round]
+            calls = self._limit_file_reads(self._normalize_calls(parsed))[: self.config.max_tool_calls_per_round]
             if not calls:
                 emit("✔ Empty tool list — finishing.")
                 return str(parsed.get("message") or last_response).strip()

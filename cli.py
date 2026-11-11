@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Reply protocol. Default: json.")
     ap.add_argument("--debug", action="store_true", help="Verbose logs.")
     ap.add_argument("--max-rounds", type=int, default=None)
+    ap.add_argument("--no-auto-refresh", action="store_true",
+                    help="Disable automatic reconnect on socket errors / locked UI.")
     args = ap.parse_args(argv)
 
     config = AgentConfig()
@@ -73,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     browser.mark_ready()
     browser._deepthink_on = args.deepthink
+    browser.auto_refresh = not args.no_auto_refresh
 
     tools = ProjectTools(root, config)
     git = GitTools(root)
